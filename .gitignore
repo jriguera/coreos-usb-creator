@@ -1,0 +1,4 @@
+# exclude:
+syslinux*
+*.iso
+*.img
