@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
 # Coreos image builder (hybrid ISO and FAT32 IMG) for Linux
-# (c) 2014 Jose Riguera <jriguera@gmail.com>
+# (c) 2014-2015 Jose Riguera <jriguera@gmail.com>
 # Licensed under GPLv3
-# https://github.com/nyarla/coreos-live-iso
+# Idea taken from https://github.com/nyarla/coreos-live-iso
 set -e
 
 PROGRAM=${PROGRAM:-$(basename $0)}
@@ -12,15 +12,27 @@ PROGRAM_OPTS=$@
 
 # Default config
 SYSLINUX_VERSION="6.02"
-COREOS_VERSION="master"
+COREOS_VERSION="current"
+COREOS_CHANNEL="stable"
 MEMTEST_VERSION="5.01"
 IMG_SIZE=1000
 IMG_TYPE="ISO"
 AUTOLOGIN=0
 INIT_SCRIPT="cloud-config.yml"
-INSTALL_SCRIPT="install.sh"
-OEM_CLOUD_CONFIG=""
-AUTOINSTALL=0
+OEM_CLOUD_CONFIG="oem-config.yml"
+INSTALL_SCRIPT=""
+CLOUD_CONFIG_URL=""
+VOL_LABEL="COREOS"
+BACKGROUND="splash.png"
+# Depending on the coreos version, it could be (first try with empty variable)
+# rootflags=rw  usrflags=rw
+# rootfstype=btrfs
+BOOT_PARAMS=""
+PCIID_URL="http://pciids.sourceforge.net/v2.2/pci.ids"
+SYSLINUX_BASE_URL="https://www.kernel.org/pub/linux/utils/boot/syslinux"
+MEMTEST_BASE_URL="http://www.memtest.org/download"
+COREOS_KERN_BASENAME="coreos_production_pxe.vmlinuz"
+COREOS_INITRD_BASENAME="coreos_production_pxe_image.cpio.gz"
 
 # Functions and procedures
 #############################
@@ -30,7 +42,7 @@ usage() {
     cat <<EOF
 Usage:
 
-    $PROGRAM  [<arguments>] 
+    $PROGRAM  [<arguments>]
 
 Coreos image builder (hybrid ISO and FAT32 image) for Linux using syslinux
 IMG: editable FAT32 ready to dump to a USB drive
@@ -38,20 +50,20 @@ ISO: hybrid ISO (image and USB) ready to dump or burn
 
 Arguments:
 
-   -a, --autologin			Enable coreos.autologin boot parameter
-   -h, --help           		Show this usage message
-   -i, --initcloudconfig <cloud-config> Cloud-config for live booting
-   -k, --sshkey <file> 			ssh-key file to include automatically
-   -l, --syslinuxversion <version> 	Syslinux version ($SYSLINUX_VERSION)
-   -o, --output <file>			Output image file (coreos-${COREOS_VERSION}.iso)
-   -p, --provcloudconfig <cloud-config> Cloud-config to perform automatic install
-   -s, --size <#>       		Size in MB ($IMG_SIZE)
-   -v, --coreosversion <version>   	Coreos version ($COREOS_VERSION)
-   -u, --usb				Create an IMG file (ISO)
-       --autoinstall		        Run automatically automatic install (WARNING!)
-       --oemcloudconfig <cloud-config>  Static basic cloud-config for OEM
+   -a, --autologin          Enable coreos.autologin boot parameter
+   -h, --help               Show this usage message
+   -c, --cloudconfig <cloud-config>       Cloud-config file for cloud-config
+   -k, --sshkey <file>      ssh-key file to include automatically via boot cmd
+   -o, --output <file>      Output image file (coreos-${COREOS_VERSION}.iso)
+   -i, --autoinstall <cloud-config>       Cloud-config to automatic install
+   -s, --size <#>           Size in MB ($IMG_SIZE)
+   -v, --coreosversion <version>          Coreos version ($COREOS_VERSION)
+   -l, --coreoschannel <channel>          Choose from [alpha, beta, stable]
+   -u, --usb                Create an IMG file to dump to USB (ISO hybrid)
+       --oemcloudconfig <cloud-config>    Static basic cloud-config for OEM
+       --cloudconfigurl <url>             URL for cloud-config via boot cmd
 
-Note that a cloud-config file can be a bash script file. See cloud-init documentation.
+Note: a cloud-config file can be a bash script file. See cloud-init docs.
 
 EOF
 }
@@ -65,7 +77,7 @@ download() {
     if [ ! -z "${destin}" ]; then
         wget --progress=dot "${url}" -O  "${destin}" 2>&1 | grep --line-buffered "%" | \
         sed -u -e "s,\.,,g" | awk '{printf("\b\b\b\b%4s", $2)}'
-    else 
+    else
         wget --progress=dot "${url}" 2>&1 | grep --line-buffered "%" | \
         sed -u -e "s,\.,,g" | awk '{printf("\b\b\b\b%4s", $2)}'
     fi
@@ -74,52 +86,57 @@ download() {
 }
 
 
-get_coreos() {
+prepare_coreos() {
     local dst="$1"
     local kernel_url="$2"
     local initrd_url="$3"
     local oem_config="$4"
+    local cconfig_file=$(basename "${5}")
+    local cconfig_file_vol_label="$6"
 
     local coreos_path="${dst}/coreos"
 
     mkdir -p ${coreos_path}
     if [ ! -e "${coreos_path}/vmlinuz" ]; then
-        echo -n "-> Downloading CoreOS's kernel $(basename ${kernel_url}):  "
+        echo "-> Downloading CoreOS's kernel ... "
+        echo -n "-> ${kernel_url}:  "
         download "${kernel_url}" "${coreos_path}/vmlinuz"
     else
         echo "-> CoreOS's kernel already downloaded."
     fi
     if [ ! -e "${coreos_path}/cpio.gz" ]; then
-        echo -n "-> Downloading CoreOS's initrd $(basename ${kernel_url}):  "
+        echo "-> Downloading CoreOS's initrd ... "
+        echo -n "-> ${initrd_url}:  "
         download "${initrd_url}" "${coreos_path}/cpio.gz"
     else
         echo "-> CoreOS's initrd already downloaded."
     fi
     if [ -e "${oem_config}" ]; then
-        echo "-> Integrating OEM config ${oem_config} ..."
+        echo -n "-> Integrating OEM config ${oem_config} ... "
         mkdir -p "${coreos_path}/usr/share/oem"
-        cp "${oem_config}" "${coreos_path}/$(basename ${oem_config})"
-        cp "${oem_config}" "${coreos_path}/usr/share/oem/cloud-config.yml"
-        cd "${coreos_path}" && gzip -d cpio.gz && find usr | cpio -o -A -H newc -O cpio && gzip cpio
+        #cp "${oem_config}" "${coreos_path}/$(basename ${oem_config})"
+        sed "s/_===TAG===_/${cconfig_file_vol_label}/g;s/_===CONFIG===_/${cconfig_file}/g" \
+            "${oem_config}" > "${coreos_path}/usr/share/oem/cloud-config.yml"
+        cd "${coreos_path}" && gzip -d cpio.gz && find usr | cpio --quiet -o -A -H newc -O cpio && gzip cpio
         rm -rf "${coreos_path}/usr"
-        echo "-> Setting RO attribute to ${oem_config} ..."
-        sudo chattr +i "${coreos_path}/$(basename ${oem_config})"
+        echo "done"
     else
         echo "-> Skipping OEM config."
     fi
 }
 
 
-make_dev() {
+make_device() {
     local dst="$1"
     local syslinux="$2"
-    local size="$3"
-    local img="$4"
+    local vol_label="$3"
+    local size="$4"
+    local img="$5"
 
     local device
-    local label="COREOS"
     local sysl_path="${dst}/syslinux"
 
+    echo "-> WARNING: You will need sudo permissions to operate with a loop device ..."
     echo "-> Creating base image ${img} with dd ..."
     dd if=/dev/zero of="${img}" bs=1M count=${size} 2>/dev/null
     echo "-> Associating ${img} with a loop device ..."
@@ -130,7 +147,7 @@ make_dev() {
     echo "-> Writing syslinux MBR on ${device} ..."
     sudo dd bs=440 count=1 conv=notrunc if="${syslinux}/bios/mbr/mbr.bin" of=${device} 2>/dev/null
     echo "-> Creating FAT partition and fs on ${device} ..."
-    sudo mkfs -t vfat -F 32 -n "${label}" ${device}p1 >/dev/null
+    sudo mkfs -t vfat -F 32 -n "${vol_label}" ${device}p1 >/dev/null
     echo "-> Mounting ${device}p1 on $(basename ${dst}) ..."
     sudo mount -t vfat -o loop,uid=$(id -u $USER) ${device}p1 "${dst}"
     echo "-> Installing syslinux (extlinux) ..."
@@ -141,53 +158,30 @@ make_dev() {
 
 set_confiles() {
     local dst="$1"
-    local init="$2"
+    local cloudconfig="$2"
     local files="$3"
-    local autologin="$4"
-    local key="$5"
-    local installer="$6"
-    local autoinstaller="$7"
-
-    local sshkey=""
-    local alogin=""
-    local cloudconfig="/$(basename ${init})"
+    local installer="$4"
+    local boot_cmd="$5"
 
     echo "-> Copying live configuration files ..."
-    cp -a "${init}" "${dst}/"
+    cp -a "${cloudconfig}" "${dst}/"
     if [ ! -z ${files} ]; then
         for f in ${files}; do
             cp "$f" "${dst}/"
         done
     fi
-    [ ! -z "${key}" ] && sshkey="sshkey=\"${key}\""
-    [ ! -z "${autologin}" ] && [ "${autologin}" == "1" ] && alogin="coreos.autologin"
+    [ ! -z "${installer}" ] && cp -a "${installer}" "${dst}/"
     echo "-> Creating main syslinux.cfg file ..."
-    if [ ! -z "${installer}" ]; then
-        [ ! -z "${autoinstaller}" ] && [ "${autoinstaller}" == "1" ] && cloudconfig="/$(basename ${installer})"
-        cp -a "${installer}" "${dst}/"
-    fi
     cat <<EOF > "${dst}/syslinux.cfg"
 LABEL coreos
     MENU LABEL Run CoreOS
     KERNEL /coreos/vmlinuz
-    APPEND initrd=/coreos/cpio.gz root=squashfs: state=tmpfs: ${alogin} ${sshkey} cloud-config-url=${cloudconfig}
+    APPEND initrd=/coreos/cpio.gz ${boot_cmd}
     TEXT HELP
 CoreOS is Linux distribution rearchitected to provide features to run
 modern infrastructure stacks.
     ENDTEXT
 EOF
-    if [ ! -z "${installer}" ] && [ "${autoinstaller}" != "1" ]; then
-        echo "-> Defining install on syslinux.cfg file ..."
-        cat <<EOF >> "${dst}/syslinux.cfg"
-LABEL coreosinstall
-    MENU LABEL Automatically Install Coreos
-    KERNEL /coreos/vmlinuz
-    APPEND initrd=/coreos/cpio.gz root=squashfs: state=tmpfs: ${sshkey} cloud-config-url=/$(basename ${installer})
-    TEXT HELP
-Warning!!: Automatically installs CoreOS on your system and reboots!
-    ENDTEXT
-EOF
-    fi
 }
 
 
@@ -197,6 +191,7 @@ set_syslinux() {
     local syslinux_url="$3"
     local memtest_url="$4"
     local pciid_url="$5"
+    local background="$6"
 
     local sysl_path="${dst}/syslinux"
     local memtest_path="${dst}/memtest"
@@ -232,11 +227,11 @@ set_syslinux() {
     download "${pciid_url}" "pci.ids"
     cd "${sysl_path}"
     echo "-> Creating default syslinux.cfg configuration file ..."
-    cat <<"EOF" > "${sysl_path}/syslinux.cfg"
+    cat <<EOF > "${sysl_path}/syslinux.cfg"
 SERIAL 0 38400
 UI vesamenu.c32
 MENU TITLE Coreos Boot Menu
-MENU BACKGROUND /splash.png
+MENU BACKGROUND /${background}
 TIMEOUT 600
 PROMPT 0
 ONTIMEOUT coreos
@@ -273,7 +268,7 @@ Boot the operating system from the first bios disk.
 
 LABEL hdt
     MENU LABEL Hardware Detection Tool
-    COM32 hdt.c32 
+    COM32 hdt.c32
     APPEND pciids=pci.ids
     TEXT HELP
 HDT (Hardware Detection Tool) displays hardware low-level information.
@@ -289,7 +284,7 @@ Memtest86+ checks RAM for errors by doing stress tests operations.
 LABEL reboot
     MENU LABEL Reboot
     COM32 reboot.c32
- 
+
 LABEL poweroff
     MENU LABEL Power Off
     COM32 poweroff.c32
@@ -300,11 +295,12 @@ EOF
 make_iso() {
     local dst="$1"
     local syslinux="$2"
-    local output="$3"
+    local label="$3"
+    local output="$4"
 
     echo -n "-> Making hybrid ISO image $(basename ${output}) ... "
     cd "${dst}"
-    mkisofs -quiet -l -r -J -input-charset utf-8 -o "${output}" \
+    mkisofs -V "${label}" -quiet -l -r -J -input-charset utf-8 -o "${output}" \
             -b syslinux/isolinux.bin -c syslinux/boot.cat \
             -no-emul-boot -boot-load-size 4 -boot-info-table .
     ${syslinux}/bios/utils/isohybrid "${output}"
@@ -321,7 +317,7 @@ start() {
         echo -n "-> Downloading $(basename ${syslinux_url}):  "
         cd $(dirname "${syslinux}")
         download "${syslinux_url}" "${syslinux}.tar.gz"
-        tar zxf "${syslinux}.tar.gz" 
+        tar zxf "${syslinux}.tar.gz"
     fi
     echo "-> Creating ${dst} ..."
     mkdir -p "${dst}"
@@ -349,12 +345,12 @@ finish() {
 }
 
 
-###############
+################################################################################
 # Main Program
 OPTIND=1
 FILES=""
 OUT=""
-while getopts "haus:v:l:i:o:k:p:-:" optchar; do
+while getopts "haus:v:l:c:o:k:i:-:" optchar; do
     case "${optchar}" in
         -)
             # long options
@@ -375,15 +371,15 @@ while getopts "haus:v:l:i:o:k:p:-:" optchar; do
                   eval COREOS_VERSION="\$${OPTIND}"
                   OPTIND=$(($OPTIND + 1))
                 ;;
-                syslinuxversion)
-                  eval SYSLINUX_VERSION="\$${OPTIND}"
+                coreoschannel)
+                  eval COREOS_CHANNEL="\$${OPTIND}"
                   OPTIND=$(($OPTIND + 1))
                 ;;
                 oemcloudconfig)
                   eval OEM_CLOUD_CONFIG="\$${OPTIND}"
                   OPTIND=$(($OPTIND + 1))
                 ;;
-                initcloudconfig)
+                cloudconfig)
                   eval INIT_SCRIPT="\$${OPTIND}"
                   OPTIND=$(($OPTIND + 1))
                 ;;
@@ -396,22 +392,23 @@ while getopts "haus:v:l:i:o:k:p:-:" optchar; do
                   SSHKEY=$([ -f "${sshkeyfile}" ] && cat "${sshkeyfile}")
                   OPTIND=$(($OPTIND + 1))
                 ;;
-                provcloudconfig)
+                autoinstall)
                   eval INSTALL_SCRIPT="\$${OPTIND}"
                   OPTIND=$(($OPTIND + 1))
                 ;;
-                autoinstall)
-		  AUTOINSTALL=1
-                ;;
                 autologin)
-		  AUTOLOGIN=1
+		              AUTOLOGIN=1
                 ;;
                 usb)
-		  IMG_TYPE="IMG"
+		              IMG_TYPE="IMG"
+                ;;
+                cloudconfigurl)
+                  eval CLOUD_CONFIG_URL="\$${OPTIND}"
+                  OPTIND=$(($OPTIND + 1))
                 ;;
                 *)
-                    echo "Unknown arg: ${OPTARG}"
-		    exit 1
+                  echo "Unknown arg: ${OPTARG}"
+                  exit 1
                 ;;
             esac
         ;;
@@ -426,9 +423,9 @@ while getopts "haus:v:l:i:o:k:p:-:" optchar; do
             COREOS_VERSION=$OPTARG
         ;;
         l)
-            SYSLINUX_VERSION=$OPTARG
+            COREOS_CHANNEL=$OPTARG
         ;;
-        i)
+        c)
             INIT_SCRIPT=$OPTARG
         ;;
         o)
@@ -437,7 +434,7 @@ while getopts "haus:v:l:i:o:k:p:-:" optchar; do
         k)
             SSHKEY=$([ -f "$OPTARG" ] && cat "$OPTARG")
         ;;
-        p)
+        i)
             INSTALL_SCRIPT=$OPTARG
         ;;
         a)
@@ -450,52 +447,62 @@ while getopts "haus:v:l:i:o:k:p:-:" optchar; do
 done
 shift $((OPTIND-1)) # Shift off the options and optional --.
 
-PCIID_URL="http://pciids.sourceforge.net/v2.2/pci.ids"
-SYSLINUX_BASE_URL="https://www.kernel.org/pub/linux/utils/boot/syslinux"
-SYSLINUX_BASENAME="syslinux-${SYSLINUX_VERSION}"
-SYSLINUX_URL="${SYSLINUX_BASE_URL}/${SYSLINUX_BASENAME}.tar.gz"
-MEMTEST_BASE_URL="http://www.memtest.org/download"
-MEMTEST_URL="${MEMTEST_BASE_URL}/${MEMTEST_VERSION}/memtest86+-${MEMTEST_VERSION}.bin.gz"
-COREOS_BASE_URL="http://storage.core-os.net/coreos/amd64-generic"
-COREOS_KERN_BASENAME="coreos_production_pxe.vmlinuz"
-COREOS_INITRD_BASENAME="coreos_production_pxe_image.cpio.gz"
-COREOS_KERN_URL="${COREOS_BASE_URL}/${COREOS_VERSION}/${COREOS_KERN_BASENAME}"
-COREOS_INITRD_URL="${COREOS_BASE_URL}/${COREOS_VERSION}/${COREOS_INITRD_BASENAME}"
+FILES="${BACKGROUND}"
+[ -f "${PROGRAM_DIR}/${BACKGROUND}" ] && FILES="${PROGRAM_DIR}/${BACKGROUND}"
 
+# Include the rest of the files
 for f in "$@"; do
     [ -f "${PROGRAM_DIR}/${f}" ] && f="${PROGRAM_DIR}/${f}"
     [ -f "${f}" ] && FILES="${FILES} ${f}" || echo "-> Skipping ${f}: not found!"
 done
+
+# Define the main parameters
 [ -z ${OUT} ] && OUT="${PROGRAM_DIR}/coreos-${COREOS_VERSION}"
 DST=$(cd `dirname "${OUT}"` && pwd)/$(basename ${OUT})_$$
-
+SYSLINUX_BASENAME="syslinux-${SYSLINUX_VERSION}"
+SYSLINUX_URL="${SYSLINUX_BASE_URL}/${SYSLINUX_BASENAME}.tar.gz"
 SYSLINUX_BASENAME="${PROGRAM_DIR}/${SYSLINUX_BASENAME}"
-[ ! -z "${INSTALL_SCRIPT}" ] && [ -f "${INSTALL_SCRIPT}" ] && INSTALL_SCRIPT="${PROGRAM_DIR}/${INSTALL_SCRIPT}"
-[ ! -z "${INSTALL_SCRIPT}" ] && [ ! -f "${INSTALL_SCRIPT}" ] && INSTALL_SCRIPT="" && echo "-> Skipping INSTALL script: not found!"
+MEMTEST_URL="${MEMTEST_BASE_URL}/${MEMTEST_VERSION}/memtest86+-${MEMTEST_VERSION}.bin.gz"
+COREOS_BASE_URL="http://${COREOS_CHANNEL}.release.core-os.net/amd64-usr"
+COREOS_KERN_URL="${COREOS_BASE_URL}/${COREOS_VERSION}/${COREOS_KERN_BASENAME}"
+COREOS_INITRD_URL="${COREOS_BASE_URL}/${COREOS_VERSION}/${COREOS_INITRD_BASENAME}"
 
-# create folder and download syslinux
+# Boot parameters
+[ "${AUTOLOGIN}" == "1" ] && BOOT_PARAMS="${BOOT_PARAMS} coreos.autologin"
+[ ! -z "${SSHKEY}" ] && BOOT_PARAMS="${BOOT_PARAMS} sshkey=\"${SSHKEY}\""
+[ ! -z "${CLOUD_CONFIG_URL}" ] && BOOT_PARAMS="${BOOT_PARAMS} cloud-config-url=\"${CLOUD_CONFIG_URL}\""
+
+# Check if the needed files exist
+[ ! -z "${INSTALL_SCRIPT}" ] && [ -f "${INSTALL_SCRIPT}" ] && INSTALL_SCRIPT="${PROGRAM_DIR}/${INSTALL_SCRIPT}"
+[ ! -z "${INSTALL_SCRIPT}" ] && [ ! -f "${INSTALL_SCRIPT}" ] && echo "-> autoinstall: not found!" && exit 1
+[ ! -z "${OEM_CLOUD_CONFIG}" ] && [ -f "${OEM_CLOUD_CONFIG}" ] && OEM_CLOUD_CONFIG="${PROGRAM_DIR}/${OEM_CLOUD_CONFIG}"
+[ ! -z "${OEM_CLOUD_CONFIG}" ] && [ ! -f "${OEM_CLOUD_CONFIG}" ] && echo "-> oem cloud-config: not found!" && exit 1
+[ -f "${INIT_SCRIPT}" ] && INIT_SCRIPT="${PROGRAM_DIR}/${INIT_SCRIPT}"
+[ ! -f "${INIT_SCRIPT}" ] && echo "-> cloud-config not found!" && exit 1
+
+# Process
+# 1. create folder and download syslinux
 start "${DST}" "${SYSLINUX_BASENAME}" "${SYSLINUX_URL}"
 
-# if IMG: create device, partitions, fs and install syslinux
-[ "${IMG_TYPE}" == "IMG" ] && make_dev "${DST}" "${SYSLINUX_BASENAME}" ${IMG_SIZE} "${OUT}.img"
+# 2. If IMG: create device, partitions, fs and install syslinux
+[ "${IMG_TYPE}" == "IMG" ] && make_device "${DST}" "${SYSLINUX_BASENAME}" "${VOL_LABEL}" "${IMG_SIZE}" "${OUT}.img"
 
-# setup syslinux files and modules
-set_syslinux "${DST}" "${SYSLINUX_BASENAME}" "${SYSLINUX_URL}" "${MEMTEST_URL}" "${PCIID_URL}"
+# 3. Setup syslinux files and modules
+set_syslinux "${DST}" "${SYSLINUX_BASENAME}" "${SYSLINUX_URL}" "${MEMTEST_URL}" "${PCIID_URL}" "$(basename ${BACKGROUND})"
 
-# download coreos img and initrd
-OEM="" && [ ! -z "${OEM_CLOUD_CONFIG}" ] && [ -e "${OEM_CLOUD_CONFIG}" ] && OEM="${PROGRAM_DIR}/${OEM_CLOUD_CONFIG}"
-get_coreos "${DST}" "${COREOS_KERN_URL}" "${COREOS_INITRD_URL}" "${OEM}"
+# 4. Download coreos img and initrd
+[ -z "${INSTALL_SCRIPT}" ] && SCRIPT="${INIT_SCRIPT}" || SCRIPT="${INSTALL_SCRIPT}"
+prepare_coreos "${DST}" "${COREOS_KERN_URL}" "${COREOS_INITRD_URL}" "${OEM_CLOUD_CONFIG}" "${SCRIPT}" "${VOL_LABEL}"
 
-# copy files: cloud-config and syslinux.cfg
-set_confiles "${DST}" "${PROGRAM_DIR}/${INIT_SCRIPT}" "${FILES}" ${AUTOLOGIN} "${SSHKEY}" "${INSTALL_SCRIPT}" "${AUTOINSTALL}"
+# 5. Copy files: cloud-config and syslinux.cfg
+set_confiles "${DST}" "${INIT_SCRIPT}" "${FILES}" "${INSTALL_SCRIPT}" "${BOOT_PARAMS}"
 
-# if ISO: create iso
-[ "${IMG_TYPE}" == "ISO" ] && make_iso "${DST}" "${SYSLINUX_BASENAME}" "${OUT}.iso"
+# 6. if ISO: create iso
+[ "${IMG_TYPE}" == "ISO" ] && make_iso "${DST}" "${SYSLINUX_BASENAME}" "${VOL_LABEL}" "${OUT}.iso"
 
-# umount and delete folders
+# 7. Umount and delete folders
 finish "${DST}" "${SYSLINUX_BASENAME}" "${OUT}.img"
 
-[ "${AUTOINSTALL}" == "1" ] && echo -e "\n-> WARNING this image is like a virus!. Be careful, it is autoinstallable!\n" 
+[ ! -z "${INSTALL_SCRIPT}" ] && echo -e "\n-> WARNING this image is like a virus!. Be careful, it is autoinstalable!\n"
 
 # EOF
-
