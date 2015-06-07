@@ -1,6 +1,8 @@
 coreos-usb-creator
 ==================
 
+![ScreenShot](booting.png)
+
 This is a small utility to create Coreos images ready to boot from a USB device
 or from a CD. In the first case, it will create a image with a FAT32 filesystem
 with all the required components inside (syslinux, coreos, ...) and a
