@@ -53,6 +53,31 @@ Note: a cloud-config file can be a bash script file. See cloud-init docs.
 Usage
 -----
 
+First of all, the script depends on some programs, make sure you have installed
+those:
+
+* wget
+* gzip
+* dd
+* 32-bit support (to run commands from syslinux release)
+* mkisofs
+
+
+To create USB images:
+
+* sudo (to access to loop devices and create filesystems)
+* parted (to create partitions on the loop device)
+* extlinux*
+* losetup (to control loop devices)
+
+
+If extlinux and isohybrid commands are not found in the system, the script will
+try to use equivalent ones precompiled in the syslinux release, but in order
+to run those, you will need to have installed 32-bit support
+(`sudo apt install libc6:i386 libuuid1:i386` or yum -y `install glibc.i686`)
+on the system. See https://github.com/jriguera/coreos-usb-creator/issues/1
+
+
 The program will download *syslinux*, *memtest*, *pci.ids* and the Coreos
 kernel and ramdisk from their websites, so a connection to the Internet 
 is required.
