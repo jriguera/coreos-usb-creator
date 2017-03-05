@@ -11,7 +11,7 @@ PROGRAM_DIR=$(cd $(dirname "$0") && pwd)
 PROGRAM_OPTS=$@
 
 # Default config
-SYSLINUX_VERSION="6.02"
+SYSLINUX_VERSION="6.03"
 COREOS_VERSION="current"
 COREOS_CHANNEL="stable"
 MEMTEST_VERSION="5.01"
@@ -28,7 +28,7 @@ BACKGROUND="splash.png"
 # rootflags=rw  usrflags=rw
 # rootfstype=btrfs
 BOOT_PARAMS=""
-PCIID_URL="http://pciids.sourceforge.net/v2.2/pci.ids"
+PCIID_URL="http://pci-ids.ucw.cz/v2.2/pci.ids"
 SYSLINUX_BASE_URL="https://www.kernel.org/pub/linux/utils/boot/syslinux"
 MEMTEST_BASE_URL="http://www.memtest.org/download"
 COREOS_KERN_BASENAME="coreos_production_pxe.vmlinuz"
@@ -152,7 +152,7 @@ make_device() {
     sudo mount -t vfat -o loop,uid=$(id -u $USER) ${device}p1 "${dst}"
     echo "-> Installing syslinux (extlinux) ..."
     sudo mkdir -p "${sysl_path}"
-    sudo "${syslinux}"/bios/extlinux/extlinux --install "${sysl_path}" 2>/dev/null
+    sudo "${syslinux}"/bios/extlinux/extlinux -s --install "${sysl_path}" 2>/dev/null
 }
 
 
@@ -356,8 +356,8 @@ while getopts "haus:v:l:c:o:k:i:-:" optchar; do
             # long options
             case "${OPTARG}" in
                 help)
-                    usage
-                    exit 0
+                  usage
+                  exit 0
                 ;;
                 type)
                   eval IMG_TYPE="\$${OPTIND}"
@@ -397,10 +397,10 @@ while getopts "haus:v:l:c:o:k:i:-:" optchar; do
                   OPTIND=$(($OPTIND + 1))
                 ;;
                 autologin)
-		              AUTOLOGIN=1
+                  AUTOLOGIN=1
                 ;;
                 usb)
-		              IMG_TYPE="IMG"
+                  IMG_TYPE="IMG"
                 ;;
                 cloudconfigurl)
                   eval CLOUD_CONFIG_URL="\$${OPTIND}"
